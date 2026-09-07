@@ -36,20 +36,30 @@ export class ExnessBroker {
     });
 
     this.account =
-      await this.api.metatraderAccountApi.getAccount(CONFIG.accountId);
+      await this.api.metatraderAccountApi.getAccount(
+        CONFIG.accountId
+      );
 
-    this.connection = this.account.getStreamingConnection();
+    this.connection =
+      this.account.getStreamingConnection();
 
     this.connection.addSynchronizationListener({
       onSymbolPriceUpdated: async (_instanceIndex, price) => {
-        if (price?.symbol !== this.symbol) return;
+        if (price?.symbol !== this.symbol) {
+          return;
+        }
 
         const t0 = Date.now();
 
         const bid = Number(price.bid);
         const ask = Number(price.ask);
 
-        if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
+        if (
+          !Number.isFinite(bid) ||
+          !Number.isFinite(ask)
+        ) {
+          return;
+        }
 
         const p = {
           symbol: this.symbol,
@@ -63,9 +73,14 @@ export class ExnessBroker {
         };
 
         this.lastPrice = p;
+
         this.metrics.tick();
+
         this.emitTick(p);
-        this.metrics.recordLatency(Date.now() - t0);
+
+        this.metrics.recordLatency(
+          Date.now() - t0
+        );
       },
 
       onDisconnected: async (_i) => {
@@ -81,27 +96,39 @@ export class ExnessBroker {
 
     await this.connection.waitSynchronized();
 
-    await this.connection.subscribeToMarketData(this.symbol);
+    await this.connection.subscribeToMarketData(
+      this.symbol
+    );
 
     this.spec =
-      this.connection.terminalState.specification(this.symbol);
+      this.connection.terminalState.specification(
+        this.symbol
+      );
 
     this.ready = true;
 
     return {
-      connected: this.connection.terminalState.connected,
+      connected:
+        this.connection.terminalState.connected,
+
       connectedToBroker:
         this.connection.terminalState.connectedToBroker,
+
       specification: this.spec
     };
   }
 
   accountInfo() {
-    return this.connection?.terminalState?.accountInformation || null;
+    return (
+      this.connection?.terminalState
+        ?.accountInformation || null
+    );
   }
 
   positions() {
-    return this.connection?.terminalState?.positions || [];
+    return (
+      this.connection?.terminalState?.positions || []
+    );
   }
 
   async buy(volume, sl, tp, clientId) {
@@ -141,7 +168,9 @@ export class ExnessBroker {
   }
 
   async close(positionId) {
-    return this.connection.closePosition(positionId);
+    return this.connection.closePosition(
+      positionId
+    );
   }
 
   async shutdown() {
@@ -159,6 +188,4 @@ export class ExnessBroker {
       await this.api?.close();
     } catch {}
   }
-}  async close(positionId){ return this.connection.closePosition(positionId); }
-  async shutdown(){ try{await this.connection?.unsubscribeFromMarketData(this.symbol);}catch{} try{await this.connection?.close();}catch{} try{await this.api?.close();}catch{} }
-}
+      }
