@@ -20,12 +20,12 @@ export class ExnessBroker {
     return () => this.listeners.delete(fn);
   }
 
-  emitTick(p) {
+  emitTick(price) {
     for (const fn of this.listeners) {
       try {
-        fn(p);
+        fn(price);
       } catch (e) {
-        console.error('tick handler', e);
+        console.error('tick handler error:', e);
       }
     }
   }
@@ -40,63 +40,255 @@ export class ExnessBroker {
         CONFIG.accountId
       );
 
+    console.log(
+      `MetaApi account region: ${this.account.region}`
+    );
+
+    console.log(
+      `MetaApi account connection status: ${this.account.connectionStatus}`
+    );
+
     this.connection =
       this.account.getStreamingConnection();
 
     this.connection.addSynchronizationListener({
-      onSymbolPricesUpdated: async (_instanceIndex, prices) => {
-        if (!Array.isArray(prices)) {
-          prices = [prices];
-        }
 
-        for (const price of prices) {
-          if (price?.symbol !== this.symbol) {
-            continue;
-          }
+      async onConnected(instanceIndex, replicas) {
+        console.log(
+          `MetaApi terminal connected: ${instanceIndex}, replicas=${replicas}`
+        );
+      },
 
-          const t0 = Date.now();
+      async onDisconnected(instanceIndex) {
+        console.warn(
+          `MetaApi terminal disconnected: ${instanceIndex}`
+        );
 
-          const bid = Number(price.bid);
-          const ask = Number(price.ask);
+        this.ready = false;
+      },
 
-          if (
-            !Number.isFinite(bid) ||
-            !Number.isFinite(ask)
-          ) {
-            continue;
-          }
+      async onHealthStatus(instanceIndex, status) {
+        console.log(
+          `MetaApi health status: ${instanceIndex}`,
+          status
+        );
+      },
 
-          const p = {
-            symbol: this.symbol,
-            bid,
-            ask,
-            mid: (bid + ask) / 2,
-            timeMs: price.time
-              ? new Date(price.time).getTime()
-              : Date.now(),
-            receivedAt: Date.now()
-          };
+      async onBrokerConnectionStatusChanged(
+        instanceIndex,
+        connected
+      ) {
+        console.log(
+          `Broker connection: ${instanceIndex} -> ${connected}`
+        );
+      },
 
-          this.lastPrice = p;
+      async onSynchronizationStarted(
+        instanceIndex,
+        specificationsHash,
+        positionsHash,
+        ordersHash,
+        synchronizationId
+      ) {
+        console.log(
+          `Synchronization started: ${instanceIndex}`
+        );
+      },
 
-          this.metrics.tick();
+      async onAccountInformationUpdated(
+        instanceIndex,
+        accountInformation
+      ) {
+        // Account state is maintained by MetaApi terminalState.
+      },
 
-          this.emitTick(p);
+      async onPositionsReplaced(
+        instanceIndex,
+        positions
+      ) {},
 
-          this.metrics.recordLatency(
-            Date.now() - t0
+      async onPositionsSynchronized(
+        instanceIndex,
+        synchronizationId
+      ) {},
+
+      async onPositionsUpdated(
+        instanceIndex,
+        positions,
+        removedPositionIds
+      ) {},
+
+      async onPositionUpdated(
+        instanceIndex,
+        position
+      ) {},
+
+      async onPositionRemoved(
+        instanceIndex,
+        positionId
+      ) {},
+
+      async onPendingOrdersReplaced(
+        instanceIndex,
+        orders
+      ) {},
+
+      async onPendingOrdersUpdated(
+        instanceIndex,
+        orders,
+        completedOrderIds
+      ) {},
+
+      async onPendingOrderUpdated(
+        instanceIndex,
+        order
+      ) {},
+
+      async onPendingOrderCompleted(
+        instanceIndex,
+        orderId
+      ) {},
+
+      async onPendingOrdersSynchronized(
+        instanceIndex,
+        synchronizationId
+      ) {},
+
+      async onHistoryOrderAdded(
+        instanceIndex,
+        historyOrder
+      ) {},
+
+      async onHistoryOrdersSynchronized(
+        instanceIndex,
+        synchronizationId
+      ) {},
+
+      async onDealAdded(
+        instanceIndex,
+        deal
+      ) {},
+
+      async onDealsSynchronized(
+        instanceIndex,
+        synchronizationId
+      ) {},
+
+      async onSymbolSpecificationUpdated(
+        instanceIndex,
+        specification
+      ) {
+        if (
+          specification &&
+          specification.symbol === this.symbol
+        ) {
+          this.spec = specification;
+
+          console.log(
+            `Symbol specification received: ${this.symbol}`
           );
         }
       },
 
-      onDisconnected: async (_instanceIndex) => {
-        this.ready = false;
-        console.warn('MetaApi disconnected');
+      async onSymbolSpecificationRemoved(
+        instanceIndex,
+        symbol
+      ) {},
+
+      async onSymbolSpecificationsUpdated(
+        instanceIndex,
+        specifications,
+        removedSymbols
+      ) {
+        if (!Array.isArray(specifications)) return;
+
+        const match = specifications.find(
+          s => s?.symbol === this.symbol
+        );
+
+        if (match) {
+          this.spec = match;
+
+          console.log(
+            `Symbol specification received: ${this.symbol}`
+          );
+        }
       },
 
-      onConnected: async () => {
-        this.ready = true;
-        console.log('MetaApi connection established');
+      async onSymbolPriceUpdated(
+        instanceIndex,
+        price
+      ) {
+        await this.processPrice(price);
+      },
+
+      async onSymbolPricesUpdated(
+        instanceIndex,
+        prices,
+        equity,
+        margin,
+        freeMargin,
+        marginLevel,
+        accountCurrencyExchangeRate
+      ) {
+        if (!Array.isArray(prices)) return;
+
+        for (const price of prices) {
+          await this.processPrice(price);
+        }
+      },
+
+      async onCandlesUpdated(
+        instanceIndex,
+        candles,
+        equity,
+        margin,
+        freeMargin,
+        marginLevel,
+        accountCurrencyExchangeRate
+      ) {},
+
+      async onTicksUpdated(
+        instanceIndex,
+        ticks,
+        equity,
+        margin,
+        freeMargin,
+        marginLevel,
+        accountCurrencyExchangeRate
+      ) {},
+
+      async onBooksUpdated(
+        instanceIndex,
+        books,
+        equity,
+        margin,
+        freeMargin,
+        marginLevel,
+        accountCurrencyExchangeRate
+      ) {},
+
+      async onSubscriptionDowngraded(
+        instanceIndex,
+        symbol,
+        updates,
+        unsubscriptions
+      ) {},
+
+      async onStreamClosed(
+        instanceIndex
+      ) {
+        console.warn(
+          `MetaApi stream closed: ${instanceIndex}`
+        );
+      },
+
+      async onUnsubscribeRegion(
+        region
+      ) {
+        console.warn(
+          `MetaApi region unsubscribed: ${region}`
+        );
       }
     });
 
@@ -104,14 +296,30 @@ export class ExnessBroker {
 
     await this.connection.waitSynchronized();
 
+    console.log('MetaApi synchronization complete');
+
     await this.connection.subscribeToMarketData(
       this.symbol
+    );
+
+    console.log(
+      `Subscribed to market data: ${this.symbol}`
     );
 
     this.spec =
       this.connection.terminalState.specification(
         this.symbol
       );
+
+    if (!this.spec) {
+      console.warn(
+        `WARNING: No symbol specification found for ${this.symbol}`
+      );
+    } else {
+      console.log(
+        `Symbol specification loaded: ${this.symbol}`
+      );
+    }
 
     this.ready = true;
 
@@ -124,6 +332,45 @@ export class ExnessBroker {
 
       specification: this.spec
     };
+  }
+
+  async processPrice(price) {
+    if (!price || price.symbol !== this.symbol) {
+      return;
+    }
+
+    const bid = Number(price.bid);
+    const ask = Number(price.ask);
+
+    if (
+      !Number.isFinite(bid) ||
+      !Number.isFinite(ask) ||
+      bid <= 0 ||
+      ask <= 0
+    ) {
+      return;
+    }
+
+    const receivedAt = Date.now();
+
+    const timeMs = price.time
+      ? new Date(price.time).getTime()
+      : receivedAt;
+
+    const p = {
+      symbol: price.symbol,
+      bid,
+      ask,
+      mid: (bid + ask) / 2,
+      timeMs,
+      receivedAt
+    };
+
+    this.lastPrice = p;
+
+    this.metrics.tick();
+
+    this.emitTick(p);
   }
 
   accountInfo() {
@@ -196,4 +443,4 @@ export class ExnessBroker {
       await this.api?.close();
     } catch {}
   }
-      }
+}
