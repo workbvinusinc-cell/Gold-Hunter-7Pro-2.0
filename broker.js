@@ -7,10 +7,7 @@ export class ExnessBroker {
     this.api = null;
     this.account = null;
 
-    // Streaming connection = prices/events
     this.connection = null;
-
-    // RPC connection = account/positions/trading queries
     this.rpc = null;
 
     this.symbol = CONFIG.symbol;
@@ -68,20 +65,12 @@ export class ExnessBroker {
     console.log(`MetaApi region: ${CONFIG.region}`);
     console.log(`Trading symbol: ${CONFIG.symbol}`);
 
-    // ---------------------------------------------------------
-    // METAAPI
-    // ---------------------------------------------------------
-
     this.api = new MetaApi(
       CONFIG.metaApiToken,
       {
         region: CONFIG.region
       }
     );
-
-    // ---------------------------------------------------------
-    // ACCOUNT
-    // ---------------------------------------------------------
 
     this.account =
       await this.api.metatraderAccountApi.getAccount(
@@ -95,10 +84,6 @@ export class ExnessBroker {
     console.log(
       `MetaApi account connection status: ${this.account.connectionStatus}`
     );
-
-    // ---------------------------------------------------------
-    // DEPLOY IF NECESSARY
-    // ---------------------------------------------------------
 
     if (
       this.account.state !== 'DEPLOYED' &&
@@ -131,10 +116,6 @@ export class ExnessBroker {
 
     const listener = {
 
-      // -------------------------------------------------------
-      // CONNECTION
-      // -------------------------------------------------------
-
       async onConnected(
         instanceIndex,
         replicas
@@ -154,12 +135,7 @@ export class ExnessBroker {
         broker.ready = false;
       },
 
-      async onHealthStatus(
-        instanceIndex,
-        status
-      ) {
-        // Keep quiet unless needed.
-      },
+      async onHealthStatus() {},
 
       async onBrokerConnectionStatusChanged(
         instanceIndex,
@@ -367,7 +343,7 @@ export class ExnessBroker {
     );
 
     // =========================================================
-    // GET SPECIFICATION FROM TERMINAL STATE
+    // GET SPECIFICATION
     // =========================================================
 
     try {
@@ -403,6 +379,172 @@ export class ExnessBroker {
     );
 
     return true;
+  }
+
+  // =========================================================
+  // HISTORICAL CANDLES
+  // =========================================================
+
+  async historicalCandles(
+    timeframe,
+    limit = 80
+  ) {
+    if (!this.account) {
+      throw new Error(
+        'MetaApi account is not available'
+      );
+    }
+
+    const allowed = [
+      '1m',
+      '5m',
+      '15m'
+    ];
+
+    if (!allowed.includes(timeframe)) {
+      throw new Error(
+        `Unsupported timeframe: ${timeframe}`
+      );
+    }
+
+    const requestedLimit = Math.max(
+      1,
+      Math.min(
+        Number(limit) || 80,
+        1000
+      )
+    );
+
+    console.log(
+      `Historical data request | ${this.symbol} | ${timeframe} | ${requestedLimit} candles`
+    );
+
+    try {
+      const candles =
+        await this.account.getHistoricalCandles(
+          this.symbol,
+          timeframe,
+          undefined,
+          requestedLimit
+        );
+
+      if (!Array.isArray(candles)) {
+        console.warn(
+          `Historical data returned invalid response for ${timeframe}`
+        );
+
+        return [];
+      }
+
+      const timeframeSeconds = {
+        '1m': 60,
+        '5m': 300,
+        '15m': 900
+      }[timeframe];
+
+      const nowSeconds =
+        Math.floor(Date.now() / 1000);
+
+      const normalized =
+        candles
+          .map(candle => {
+            if (!candle) {
+              return null;
+            }
+
+            let epoch = 0;
+
+            if (
+              typeof candle.time === 'number'
+            ) {
+              epoch =
+                candle.time > 100000000000
+                  ? Math.floor(
+                      candle.time / 1000
+                    )
+                  : Math.floor(
+                      candle.time
+                    );
+            } else if (
+              candle.time
+            ) {
+              const parsed =
+                new Date(
+                  candle.time
+                ).getTime();
+
+              if (!Number.isFinite(parsed)) {
+                return null;
+              }
+
+              epoch =
+                Math.floor(
+                  parsed / 1000
+                );
+            }
+
+            const open =
+              Number(candle.open);
+
+            const high =
+              Number(candle.high);
+
+            const low =
+              Number(candle.low);
+
+            const close =
+              Number(candle.close);
+
+            if (
+              !Number.isFinite(epoch) ||
+              !Number.isFinite(open) ||
+              !Number.isFinite(high) ||
+              !Number.isFinite(low) ||
+              !Number.isFinite(close)
+            ) {
+              return null;
+            }
+
+            return {
+              epoch,
+              open,
+              high,
+              low,
+              close,
+              volume:
+                Number(
+                  candle.volume ??
+                  candle.tickVolume ??
+                  0
+                ) || 0
+            };
+          })
+          .filter(Boolean)
+          .filter(
+            candle =>
+              candle.epoch +
+                timeframeSeconds <=
+              nowSeconds
+          )
+          .sort(
+            (a, b) =>
+              a.epoch - b.epoch
+          );
+
+      console.log(
+        `Historical data result | ${timeframe} | ${normalized.length} closed candles`
+      );
+
+      return normalized;
+
+    } catch (error) {
+      console.warn(
+        `Historical candles unavailable for ${timeframe}:`,
+        error?.message || error
+      );
+
+      return [];
+    }
   }
 
   // =========================================================
@@ -463,10 +605,8 @@ export class ExnessBroker {
       );
     }
 
-    // Send price to strategy/execution engine.
     this.emitTick(processedPrice);
 
-    // Log only every 10 seconds.
     if (
       receivedAt - this.lastTickLog >= 10000
     ) {
