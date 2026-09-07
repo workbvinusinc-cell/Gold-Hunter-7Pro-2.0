@@ -6,7 +6,12 @@ export class ExnessBroker {
   constructor() {
     this.api = null;
     this.account = null;
+
+    // Streaming connection = prices/events
     this.connection = null;
+
+    // RPC connection = account/positions/trading queries
+    this.rpc = null;
 
     this.symbol = CONFIG.symbol;
     this.spec = null;
@@ -16,13 +21,12 @@ export class ExnessBroker {
 
     this.ready = false;
     this.lastPrice = null;
-
     this.lastTickLog = 0;
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // TICK LISTENERS
-  // ---------------------------------------------------------
+  // =========================================================
 
   onTick(fn) {
     this.listeners.add(fn);
@@ -36,15 +40,18 @@ export class ExnessBroker {
     for (const fn of this.listeners) {
       try {
         fn(price);
-      } catch (e) {
-        console.error('Tick handler error:', e);
+      } catch (error) {
+        console.error(
+          'Tick handler error:',
+          error?.message || error
+        );
       }
     }
   }
 
-  // ---------------------------------------------------------
-  // CONNECT TO METAAPI / EXNESS
-  // ---------------------------------------------------------
+  // =========================================================
+  // CONNECT
+  // =========================================================
 
   async connect() {
     if (!CONFIG.metaApiToken) {
@@ -55,73 +62,91 @@ export class ExnessBroker {
       throw new Error('METAAPI_ACCOUNT_ID is missing');
     }
 
-    // Keep reference to the actual ExnessBroker instance.
-    // MetaApi listener callbacks have their own "this".
     const broker = this;
 
     console.log('Connecting to MetaApi...');
     console.log(`MetaApi region: ${CONFIG.region}`);
     console.log(`Trading symbol: ${CONFIG.symbol}`);
 
-    this.api = new MetaApi(CONFIG.metaApiToken, {
-      region: CONFIG.region
-    });
+    // ---------------------------------------------------------
+    // METAAPI
+    // ---------------------------------------------------------
 
-    // -------------------------------------------------------
-    // GET ACCOUNT
-    // -------------------------------------------------------
+    this.api = new MetaApi(
+      CONFIG.metaApiToken,
+      {
+        region: CONFIG.region
+      }
+    );
+
+    // ---------------------------------------------------------
+    // ACCOUNT
+    // ---------------------------------------------------------
 
     this.account =
       await this.api.metatraderAccountApi.getAccount(
         CONFIG.accountId
       );
 
-    console.log(`MetaApi account region: ${this.account.region}`);
+    console.log(
+      `MetaApi account region: ${this.account.region}`
+    );
+
     console.log(
       `MetaApi account connection status: ${this.account.connectionStatus}`
     );
 
-    // -------------------------------------------------------
-    // DEPLOY ACCOUNT IF REQUIRED
-    // -------------------------------------------------------
+    // ---------------------------------------------------------
+    // DEPLOY IF NECESSARY
+    // ---------------------------------------------------------
 
     if (
       this.account.state !== 'DEPLOYED' &&
       this.account.state !== 'DEPLOYING'
     ) {
-      console.log('MetaApi account is not deployed. Deploying...');
+      console.log(
+        'MetaApi account is not deployed. Deploying...'
+      );
 
       await this.account.deploy();
-
-      console.log('MetaApi account deployment requested.');
     }
 
-    // -------------------------------------------------------
+    // ---------------------------------------------------------
     // STREAMING CONNECTION
-    // -------------------------------------------------------
+    // ---------------------------------------------------------
 
     this.connection =
       this.account.getStreamingConnection();
 
-    console.log('Connecting MetaApi websocket client...');
+    // ---------------------------------------------------------
+    // RPC CONNECTION
+    // ---------------------------------------------------------
 
-    // -------------------------------------------------------
-    // SYNCHRONIZATION LISTENER
-    // -------------------------------------------------------
+    this.rpc =
+      this.account.getRPCConnection();
 
-    this.connection.addSynchronizationListener({
+    // =========================================================
+    // STREAMING LISTENER
+    // =========================================================
 
-      // -----------------------------------------------
+    const listener = {
+
+      // -------------------------------------------------------
       // CONNECTION
-      // -----------------------------------------------
+      // -------------------------------------------------------
 
-      async onConnected(instanceIndex, replicas) {
+      async onConnected(
+        instanceIndex,
+        replicas
+      ) {
         console.log(
           `MetaApi terminal connected: ${instanceIndex}, replicas=${replicas}`
         );
       },
 
-      async onDisconnected(instanceIndex) {
+      async onDisconnected(
+        instanceIndex
+      ) {
         console.warn(
           `MetaApi terminal disconnected: ${instanceIndex}`
         );
@@ -129,11 +154,11 @@ export class ExnessBroker {
         broker.ready = false;
       },
 
-      async onHealthStatus(instanceIndex, status) {
-        console.log(
-          `MetaApi health status ${instanceIndex}:`,
-          status || {}
-        );
+      async onHealthStatus(
+        instanceIndex,
+        status
+      ) {
+        // Keep quiet unless needed.
       },
 
       async onBrokerConnectionStatusChanged(
@@ -145,110 +170,64 @@ export class ExnessBroker {
         );
       },
 
-      // -----------------------------------------------
+      // -------------------------------------------------------
       // SYNCHRONIZATION
-      // -----------------------------------------------
+      // -------------------------------------------------------
 
-      async onSynchronizationStarted(
+      async onSynchronizationStarted() {},
+
+      async onAccountInformationUpdated() {},
+
+      async onPositionsSynchronized() {},
+
+      async onPositionsReplaced() {},
+
+      async onPositionUpdated() {},
+
+      async onPositionRemoved() {},
+
+      // -------------------------------------------------------
+      // PENDING ORDERS
+      // -------------------------------------------------------
+
+      async onPendingOrdersSynchronized() {},
+
+      async onPendingOrdersReplaced() {},
+
+      async onPendingOrderUpdated() {},
+
+      async onPendingOrderCompleted() {},
+
+      async onPendingOrderRemoved() {},
+
+      // -------------------------------------------------------
+      // HISTORY
+      // -------------------------------------------------------
+
+      async onHistoryOrdersSynchronized() {},
+
+      async onHistoryOrdersAdded() {},
+
+      async onHistoryOrdersRemoved() {},
+
+      async onDealsSynchronized() {},
+
+      async onDealAdded(
         instanceIndex,
-        specifications,
-        specificationsHash,
-        synchronizationId
+        deal
       ) {
-        console.log(
-          `Synchronization started: ${instanceIndex}`
-        );
+        if (deal) {
+          console.log(
+            `Deal added: ${deal.id || 'unknown'}`
+          );
+        }
       },
 
-      async onAccountInformationUpdated(
-        instanceIndex,
-        accountInformation
-      ) {
-        // Account information is handled on demand.
-      },
+      async onDealRemoved() {},
 
-      async onPositionsReplaced(
-        instanceIndex,
-        positions
-      ) {
-        // No action required.
-      },
-
-      async onPositionUpdated(
-        instanceIndex,
-        position
-      ) {
-        // No action required.
-      },
-
-      async onPositionRemoved(
-        instanceIndex,
-        positionId
-      ) {
-        // No action required.
-      },
-
-      async onOrdersReplaced(
-        instanceIndex,
-        orders
-      ) {
-        // No action required.
-      },
-
-      async onOrderUpdated(
-        instanceIndex,
-        order
-      ) {
-        // No action required.
-      },
-
-      async onOrderCompleted(
-        instanceIndex,
-        orderId
-      ) {
-        console.log(
-          `Order completed: ${orderId}`
-        );
-      },
-
-      async onOrderRemoved(
-        instanceIndex,
-        orderId
-      ) {
-        // No action required.
-      },
-
-      async onHistoryOrdersAdded(
-        instanceIndex,
-        historyOrders
-      ) {
-        // No action required.
-      },
-
-      async onHistoryOrdersRemoved(
-        instanceIndex,
-        historyOrders
-      ) {
-        // No action required.
-      },
-
-      async onHistoryDealsAdded(
-        instanceIndex,
-        deals
-      ) {
-        // No action required.
-      },
-
-      async onHistoryDealsRemoved(
-        instanceIndex,
-        deals
-      ) {
-        // No action required.
-      },
-
-      // -----------------------------------------------
-      // SYMBOL SPECIFICATION
-      // -----------------------------------------------
+      // -------------------------------------------------------
+      // SYMBOL SPECIFICATIONS
+      // -------------------------------------------------------
 
       async onSymbolSpecificationUpdated(
         instanceIndex,
@@ -272,10 +251,6 @@ export class ExnessBroker {
       ) {
         if (symbol === broker.symbol) {
           broker.spec = null;
-
-          console.warn(
-            `Symbol specification removed: ${symbol}`
-          );
         }
       },
 
@@ -288,9 +263,9 @@ export class ExnessBroker {
         }
 
         const found = specifications.find(
-          specification =>
-            specification &&
-            specification.symbol === broker.symbol
+          item =>
+            item &&
+            item.symbol === broker.symbol
         );
 
         if (found) {
@@ -302,9 +277,9 @@ export class ExnessBroker {
         }
       },
 
-      // -----------------------------------------------
-      // PRICE STREAM
-      // -----------------------------------------------
+      // =======================================================
+      // PRICE EVENTS
+      // =======================================================
 
       async onSymbolPriceUpdated(
         instanceIndex,
@@ -315,12 +290,7 @@ export class ExnessBroker {
 
       async onSymbolPricesUpdated(
         instanceIndex,
-        prices,
-        equity,
-        margin,
-        freeMargin,
-        marginLevel,
-        accountCurrencyExchangeRate
+        prices
       ) {
         if (!Array.isArray(prices)) {
           return;
@@ -331,113 +301,62 @@ export class ExnessBroker {
         }
       },
 
-      // -----------------------------------------------
-      // MARKET DATA
-      // -----------------------------------------------
+      // -------------------------------------------------------
+      // OTHER MARKET DATA
+      // -------------------------------------------------------
 
-      async onCandlesUpdated(
-        instanceIndex,
-        candles,
-        equity,
-        margin,
-        freeMargin,
-        marginLevel,
-        accountCurrencyExchangeRate
-      ) {
-        // Candle engine can request candles directly.
-      },
+      async onCandlesUpdated() {},
 
-      async onTicksUpdated(
-        instanceIndex,
-        ticks,
-        equity,
-        margin,
-        freeMargin,
-        marginLevel,
-        accountCurrencyExchangeRate
-      ) {
-        // Price events are handled above.
-      },
+      async onTicksUpdated() {},
 
-      async onBooksUpdated(
-        instanceIndex,
-        books,
-        equity,
-        margin,
-        freeMargin,
-        marginLevel,
-        accountCurrencyExchangeRate
-      ) {
-        // Order book data is optional.
-      },
+      async onBooksUpdated() {},
 
-      // -----------------------------------------------
-      // DEALS
-      // -----------------------------------------------
+      async onSymbolPricesReset() {}
+    };
 
-      async onDealAdded(
-        instanceIndex,
-        deal
-      ) {
-        if (deal) {
-          console.log(
-            `Deal added: ${deal.id || 'unknown'}`
-          );
-        }
-      },
+    this.connection.addSynchronizationListener(
+      listener
+    );
 
-      async onDealRemoved(
-        instanceIndex,
-        deal
-      ) {
-        // No action required.
-      },
+    // =========================================================
+    // CONNECT STREAMING
+    // =========================================================
 
-      // -----------------------------------------------
-      // SYMBOL PRICES RESET
-      // -----------------------------------------------
-
-      async onSymbolPricesReset(
-        instanceIndex,
-        symbols
-      ) {
-        // No action required.
-      },
-
-      // -----------------------------------------------
-      // STREAMING STATUS
-      // -----------------------------------------------
-
-      async onStreamClosed(
-        instanceIndex
-      ) {
-        console.warn(
-          `MetaApi stream closed: ${instanceIndex}`
-        );
-
-        broker.ready = false;
-      }
-    });
-
-    // -------------------------------------------------------
-    // CONNECT
-    // -------------------------------------------------------
+    console.log(
+      'Connecting MetaApi websocket client...'
+    );
 
     await this.connection.connect();
 
-    console.log('MetaApi websocket connected.');
-
-    // -------------------------------------------------------
-    // WAIT FOR TERMINAL SYNCHRONIZATION
-    // -------------------------------------------------------
+    console.log(
+      'MetaApi websocket connected.'
+    );
 
     await this.connection.waitSynchronized();
 
-    console.log('MetaApi synchronization complete.');
+    console.log(
+      'MetaApi synchronization complete.'
+    );
 
-    // -------------------------------------------------------
-    // SUBSCRIBE TO XAUUSDm
-    // -------------------------------------------------------
+    // =========================================================
+    // CONNECT RPC
+    // =========================================================
+
+    console.log(
+      'Connecting MetaApi RPC connection...'
+    );
+
+    await this.rpc.connect();
+
+    await this.rpc.waitSynchronized();
+
+    console.log(
+      'MetaApi RPC synchronized.'
+    );
+
+    // =========================================================
+    // SUBSCRIBE XAUUSDm
+    // =========================================================
 
     await this.connection.subscribeToMarketData(
       this.symbol
@@ -447,13 +366,13 @@ export class ExnessBroker {
       `Subscribed to market data: ${this.symbol}`
     );
 
-    // -------------------------------------------------------
-    // LOAD SYMBOL SPECIFICATION
-    // -------------------------------------------------------
+    // =========================================================
+    // GET SPECIFICATION FROM TERMINAL STATE
+    // =========================================================
 
     try {
       this.spec =
-        await this.connection.getSymbolSpecification(
+        this.connection.terminalState.specification(
           this.symbol
         );
 
@@ -464,14 +383,14 @@ export class ExnessBroker {
       }
     } catch (error) {
       console.warn(
-        `Could not load symbol specification for ${this.symbol}:`,
-        error.message
+        'Could not load symbol specification:',
+        error?.message || error
       );
     }
 
-    // -------------------------------------------------------
+    // =========================================================
     // READY
-    // -------------------------------------------------------
+    // =========================================================
 
     this.ready = true;
 
@@ -486,9 +405,9 @@ export class ExnessBroker {
     return true;
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // PROCESS PRICE
-  // ---------------------------------------------------------
+  // =========================================================
 
   async processPrice(price) {
     if (!price) {
@@ -516,15 +435,15 @@ export class ExnessBroker {
     let timeMs = receivedAt;
 
     if (price.time) {
-      const parsedTime =
+      const parsed =
         new Date(price.time).getTime();
 
-      if (Number.isFinite(parsedTime)) {
-        timeMs = parsedTime;
+      if (Number.isFinite(parsed)) {
+        timeMs = parsed;
       }
     }
 
-    const p = {
+    const processedPrice = {
       symbol: price.symbol,
       bid,
       ask,
@@ -533,26 +452,21 @@ export class ExnessBroker {
       receivedAt
     };
 
-    this.lastPrice = p;
+    this.lastPrice = processedPrice;
 
-    // Update metrics.
     try {
       this.metrics.tick();
     } catch (error) {
       console.error(
-        'Metrics tick error:',
-        error.message
+        'Metrics error:',
+        error?.message || error
       );
     }
 
-    // Send price to strategy / execution engine.
-    this.emitTick(p);
+    // Send price to strategy/execution engine.
+    this.emitTick(processedPrice);
 
-    // -------------------------------------------------------
-    // LOW-FREQUENCY DEBUG LOG
-    // Prevent Render logs from being flooded.
-    // -------------------------------------------------------
-
+    // Log only every 10 seconds.
     if (
       receivedAt - this.lastTickLog >= 10000
     ) {
@@ -564,37 +478,37 @@ export class ExnessBroker {
     }
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // ACCOUNT INFORMATION
-  // ---------------------------------------------------------
+  // =========================================================
 
   async accountInfo() {
-    if (!this.connection) {
+    if (!this.rpc) {
       throw new Error(
-        'MetaApi connection is not available'
+        'MetaApi RPC connection is not available'
       );
     }
 
-    return await this.connection.getAccountInformation();
+    return await this.rpc.getAccountInformation();
   }
 
-  // ---------------------------------------------------------
-  // OPEN POSITIONS
-  // ---------------------------------------------------------
+  // =========================================================
+  // POSITIONS
+  // =========================================================
 
   async positions() {
-    if (!this.connection) {
+    if (!this.rpc) {
       throw new Error(
-        'MetaApi connection is not available'
+        'MetaApi RPC connection is not available'
       );
     }
 
-    return await this.connection.getPositions();
+    return await this.rpc.getPositions();
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // BUY
-  // ---------------------------------------------------------
+  // =========================================================
 
   async buy(
     volume,
@@ -602,9 +516,9 @@ export class ExnessBroker {
     takeProfit = undefined,
     comment = 'Gold-Hunter-7Pro'
   ) {
-    if (!this.connection) {
+    if (!this.rpc) {
       throw new Error(
-        'MetaApi connection is not available'
+        'MetaApi RPC connection is not available'
       );
     }
 
@@ -619,11 +533,12 @@ export class ExnessBroker {
       };
     }
 
-    return await this.connection.createMarketBuyOrder(
+    return await this.rpc.createMarketBuyOrder(
       this.symbol,
       volume,
       stopLoss,
       takeProfit,
+      undefined,
       {
         comment,
         magic: CONFIG.magic
@@ -631,9 +546,9 @@ export class ExnessBroker {
     );
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // SELL
-  // ---------------------------------------------------------
+  // =========================================================
 
   async sell(
     volume,
@@ -641,9 +556,9 @@ export class ExnessBroker {
     takeProfit = undefined,
     comment = 'Gold-Hunter-7Pro'
   ) {
-    if (!this.connection) {
+    if (!this.rpc) {
       throw new Error(
-        'MetaApi connection is not available'
+        'MetaApi RPC connection is not available'
       );
     }
 
@@ -658,11 +573,12 @@ export class ExnessBroker {
       };
     }
 
-    return await this.connection.createMarketSellOrder(
+    return await this.rpc.createMarketSellOrder(
       this.symbol,
       volume,
       stopLoss,
       takeProfit,
+      undefined,
       {
         comment,
         magic: CONFIG.magic
@@ -670,18 +586,18 @@ export class ExnessBroker {
     );
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // MODIFY POSITION
-  // ---------------------------------------------------------
+  // =========================================================
 
   async modify(
     positionId,
     stopLoss = undefined,
     takeProfit = undefined
   ) {
-    if (!this.connection) {
+    if (!this.rpc) {
       throw new Error(
-        'MetaApi connection is not available'
+        'MetaApi RPC connection is not available'
       );
     }
 
@@ -696,21 +612,21 @@ export class ExnessBroker {
       };
     }
 
-    return await this.connection.modifyPosition(
+    return await this.rpc.modifyPosition(
       positionId,
       stopLoss,
       takeProfit
     );
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // CLOSE POSITION
-  // ---------------------------------------------------------
+  // =========================================================
 
   async close(positionId) {
-    if (!this.connection) {
+    if (!this.rpc) {
       throw new Error(
-        'MetaApi connection is not available'
+        'MetaApi RPC connection is not available'
       );
     }
 
@@ -725,33 +641,47 @@ export class ExnessBroker {
       };
     }
 
-    return await this.connection.closePosition(
+    return await this.rpc.closePosition(
       positionId
     );
   }
 
-  // ---------------------------------------------------------
+  // =========================================================
   // SHUTDOWN
-  // ---------------------------------------------------------
+  // =========================================================
 
   async shutdown() {
     this.ready = false;
 
-    if (this.connection) {
-      try {
+    try {
+      if (this.connection) {
         await this.connection.close();
-      } catch (error) {
-        console.warn(
-          'MetaApi connection close warning:',
-          error.message
-        );
       }
+    } catch (error) {
+      console.warn(
+        'Streaming shutdown warning:',
+        error?.message || error
+      );
+    }
+
+    try {
+      if (this.rpc) {
+        await this.rpc.close();
+      }
+    } catch (error) {
+      console.warn(
+        'RPC shutdown warning:',
+        error?.message || error
+      );
     }
 
     this.connection = null;
+    this.rpc = null;
     this.account = null;
     this.api = null;
 
-    console.log('MetaApi broker shutdown complete.');
+    console.log(
+      'MetaApi broker shutdown complete.'
+    );
   }
-        }
+  }
