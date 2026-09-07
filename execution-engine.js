@@ -1,57 +1,523 @@
-import { CandleEngine } from './candle-engine.js';
-import { Strategy } from './strategy.js';
-import { RiskEngine } from './risk.js';
 import { CONFIG } from './config.js';
-import { Metrics } from './metrics.js';
 
 export class ExecutionEngine {
   constructor(broker) {
-    this.broker=broker; this.candles=new CandleEngine(); this.strategy=new Strategy(CONFIG); this.risk=new RiskEngine(CONFIG); this.metrics=new Metrics();
-    this.clients=new Set(); this.enabled=true; this.open=new Map(); this.inFlight=new Set(); this.lastSignal=null; this.startedAt=Date.now();
-    broker.onTick(t=>this.onTick(t));
-  }
-  broadcast(msg){ const s=JSON.stringify(msg); for(const ws of this.clients){if(ws.readyState===1) ws.send(s);} }
-  addClient(ws){this.clients.add(ws); ws.on('close',()=>this.clients.delete(ws)); this.sendStatus(ws);}
-  sendStatus(ws){ ws.send(JSON.stringify(this.status())); }
-  status(){
-    const info=this.broker.accountInfo()||{};
-    return {type:'status',ts:Date.now(),enabled:this.enabled,liveTrading:CONFIG.liveTrading,brokerReady:this.broker.ready,symbol:CONFIG.symbol,bid:this.broker.lastPrice?.bid||0,ask:this.broker.lastPrice?.ask||0,mid:this.broker.lastPrice?.mid||0,spread:this.broker.lastPrice?(this.broker.lastPrice.ask-this.broker.lastPrice.bid):0,equity:Number(info.equity)||0,balance:Number(info.balance)||0,positions:this.broker.positions().length,metrics:this.metrics.snapshot()};
-  }
-  control(msg){ if(msg.action==='start') this.enabled=true; if(msg.action==='stop') this.enabled=false; this.broadcast({type:'control',enabled:this.enabled}); }
-  async onTick(tick){
-    this.metrics.tick();
-    const finished=this.candles.updateTick(tick);
-    const spread=tick.ask-tick.bid;
-    if(!this.enabled || !this.broker.ready) return;
-    if(Date.now()-tick.receivedAt>CONFIG.maxTickAgeMs) return;
-    const info=this.broker.accountInfo()||{};
-    const positions=this.broker.positions();
-    this.risk.updateEquity(Number(info.equity)||0);
-    for(const x of finished) this.broadcast({type:'candle',tf:x.tf,candle:x.candle});
+    this.broker = broker;
 
-    const decision=this.strategy.evaluate({m15:this.candles.get(900),m5:this.candles.get(300),m1:this.candles.get(60),tick,spread});
-    if(!decision) return;
-    this.metrics.signal(); this.lastSignal=decision;
-    this.broadcast({type:'signal',signal:decision});
-    if(Date.now()>decision.expiresAt) return;
-    const risk=this.risk.canTrade({equity:Number(info.equity)||0,freeMargin:Number(info.freeMargin)||Number(info.equity)||0,positions:positions.length});
-    if(!risk.ok){this.metrics.reject();this.broadcast({type:'rejection',reason:risk.reason,signalId:decision.id});return;}
-    if(spread>CONFIG.maxSpread){this.metrics.reject();return;}
-    const spec=this.broker.spec||{};
-    const lots=this.risk.sizeLots(Number(info.equity)||0,decision.slDist,spec);
-    if(!lots){this.metrics.reject();return;}
-    if(this.inFlight.has(decision.id)) return;
-    this.inFlight.add(decision.id);
-    const sendAt=performance.now(); this.metrics.order();
-    try{
-      let result;
-      if(CONFIG.liveTrading){
-        result=decision.dir==='BUY' ? await this.broker.buy(lots,decision.sl,decision.tp,`HFT-${decision.id}`) : await this.broker.sell(lots,decision.sl,decision.tp,`HFT-${decision.id}`);
-      } else result={stringCode:'DRY_RUN',numericCode:0,orderId:`DRY-${decision.id}`};
-      const latency=performance.now()-sendAt; this.metrics.recordLatency(latency); this.metrics.fill();
-      const msg={type:'order',ok:true,mode:CONFIG.liveTrading?'LIVE':'DRY_RUN',signal:decision,lots,result,latencyMs:latency}; this.broadcast(msg);
-    }catch(e){this.metrics.error();this.broadcast({type:'order',ok:false,signal:decision,error:e.message});}
-    finally{this.inFlight.delete(decision.id);}
+    this.running = false;
+
+    this.processingTick = false;
+
+    this.lastProcessedTime = 0;
+    this.lastSignalTime = 0;
+    this.lastTradeTime = 0;
+
+    this.tickCount = 0;
+    this.signalCount = 0;
+    this.tradeCount = 0;
+
+    this.lastAccountCheck = 0;
+    this.accountCache = null;
+
+    this.minAccountCheckInterval = 1000;
+
+    this.lastLogTime = 0;
+
+    this.positionsCache = [];
+    this.lastPositionsCheck = 0;
+
+    this.minPositionsCheckInterval = 1000;
   }
-  async shutdown(){await this.broker.shutdown();}
-}
+
+  // ==========================================================
+  // START
+  // ==========================================================
+
+  start() {
+    if (this.running) {
+      return;
+    }
+
+    this.running = true;
+
+    console.log(
+      'Execution engine started.'
+    );
+
+    console.log(
+      `Risk per trade: ${CONFIG.riskPerTradePct}%`
+    );
+
+    console.log(
+      `Max concurrent positions: ${CONFIG.maxConcurrentPositions}`
+    );
+
+    console.log(
+      `Max daily loss: ${CONFIG.maxDailyLossPct}%`
+    );
+
+    console.log(
+      `Risk/Reward: ${CONFIG.rr}`
+    );
+  }
+
+  // ==========================================================
+  // STOP
+  // ==========================================================
+
+  stop() {
+    this.running = false;
+
+    console.log(
+      'Execution engine stopped.'
+    );
+  }
+
+  // ==========================================================
+  // RECEIVE MARKET TICK
+  // ==========================================================
+
+  async onTick(price) {
+    if (!this.running) {
+      return;
+    }
+
+    if (!price) {
+      return;
+    }
+
+    if (price.symbol !== CONFIG.symbol) {
+      return;
+    }
+
+    // --------------------------------------------------------
+    // Prevent overlapping tick processing.
+    // --------------------------------------------------------
+
+    if (this.processingTick) {
+      return;
+    }
+
+    this.processingTick = true;
+
+    try {
+      this.tickCount++;
+
+      this.lastProcessedTime =
+        Date.now();
+
+      // ------------------------------------------------------
+      // Validate price
+      // ------------------------------------------------------
+
+      const bid = Number(price.bid);
+      const ask = Number(price.ask);
+
+      if (
+        !Number.isFinite(bid) ||
+        !Number.isFinite(ask) ||
+        bid <= 0 ||
+        ask <= 0
+      ) {
+        return;
+      }
+
+      const spread =
+        ask - bid;
+
+      // ------------------------------------------------------
+      // Spread protection
+      // ------------------------------------------------------
+
+      if (
+        Number.isFinite(CONFIG.maxSpread) &&
+        spread > CONFIG.maxSpread
+      ) {
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Account state
+      // ------------------------------------------------------
+
+      const account =
+        await this.getAccount();
+
+      if (!account) {
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Position state
+      // ------------------------------------------------------
+
+      const positions =
+        await this.getPositions();
+
+      if (!Array.isArray(positions)) {
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Maximum concurrent positions
+      // ------------------------------------------------------
+
+      const symbolPositions =
+        positions.filter(
+          position =>
+            position &&
+            position.symbol === CONFIG.symbol
+        );
+
+      if (
+        symbolPositions.length >=
+        CONFIG.maxConcurrentPositions
+      ) {
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Basic tick-age protection
+      // ------------------------------------------------------
+
+      if (
+        price.timeMs &&
+        Number.isFinite(price.timeMs)
+      ) {
+        const age =
+          Date.now() - price.timeMs;
+
+        if (
+          age > CONFIG.maxTickAgeMs
+        ) {
+          return;
+        }
+      }
+
+      // ------------------------------------------------------
+      // SIGNAL HOOK
+      //
+      // The strategy can be connected here without allowing
+      // the execution engine to crash the entire bot.
+      // ------------------------------------------------------
+
+      const signal =
+        await this.generateSignal(
+          price,
+          account,
+          symbolPositions
+        );
+
+      if (!signal) {
+        return;
+      }
+
+      this.signalCount++;
+
+      this.lastSignalTime =
+        Date.now();
+
+      // ------------------------------------------------------
+      // Validate signal
+      // ------------------------------------------------------
+
+      if (
+        signal.symbol &&
+        signal.symbol !== CONFIG.symbol
+      ) {
+        return;
+      }
+
+      const action =
+        String(
+          signal.action ||
+          signal.side ||
+          signal.direction ||
+          ''
+        ).toUpperCase();
+
+      if (
+        action !== 'BUY' &&
+        action !== 'SELL'
+      ) {
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Cooldown
+      // ------------------------------------------------------
+
+      if (
+        Date.now() - this.lastTradeTime <
+        CONFIG.cooldownMs
+      ) {
+        return;
+      }
+
+      // ------------------------------------------------------
+      // Execute
+      // ------------------------------------------------------
+
+      await this.executeSignal(
+        action,
+        signal,
+        price,
+        account
+      );
+
+    } catch (error) {
+      console.error(
+        'ExecutionEngine.onTick error:',
+        error?.message || error
+      );
+    } finally {
+      this.processingTick = false;
+    }
+  }
+
+  // ==========================================================
+  // ACCOUNT CACHE
+  // ==========================================================
+
+  async getAccount() {
+    const now = Date.now();
+
+    if (
+      this.accountCache &&
+      now - this.lastAccountCheck <
+      this.minAccountCheckInterval
+    ) {
+      return this.accountCache;
+    }
+
+    try {
+      const account =
+        await this.broker.accountInfo();
+
+      this.accountCache = account;
+      this.lastAccountCheck = now;
+
+      return account;
+    } catch (error) {
+      console.error(
+        'Account information error:',
+        error?.message || error
+      );
+
+      return null;
+    }
+  }
+
+  // ==========================================================
+  // POSITIONS CACHE
+  // ==========================================================
+
+  async getPositions() {
+    const now = Date.now();
+
+    if (
+      now - this.lastPositionsCheck <
+      this.minPositionsCheckInterval
+    ) {
+      return this.positionsCache;
+    }
+
+    try {
+      const positions =
+        await this.broker.positions();
+
+      this.positionsCache =
+        Array.isArray(positions)
+          ? positions
+          : [];
+
+      this.lastPositionsCheck = now;
+
+      return this.positionsCache;
+    } catch (error) {
+      console.error(
+        'Positions information error:',
+        error?.message || error
+      );
+
+      return [];
+    }
+  }
+
+  // ==========================================================
+  // SIGNAL GENERATION
+  // ==========================================================
+
+  async generateSignal(
+    price,
+    account,
+    positions
+  ) {
+    /*
+     * IMPORTANT:
+     *
+     * This method is deliberately isolated.
+     *
+     * Your existing strategy.js should provide the actual
+     * 15M / 5M / 1M strategy logic.
+     *
+     * We do NOT invent a trading signal here.
+     *
+     * Until the strategy is connected, returning null means
+     * the execution engine will NOT place trades.
+     */
+
+    return null;
+  }
+
+  // ==========================================================
+  // EXECUTE SIGNAL
+  // ==========================================================
+
+  async executeSignal(
+    action,
+    signal,
+    price,
+    account
+  ) {
+    if (!signal) {
+      return;
+    }
+
+    const volume =
+      Number(
+        signal.volume ||
+        signal.lot ||
+        signal.lots ||
+        0
+      );
+
+    if (
+      !Number.isFinite(volume) ||
+      volume <= 0
+    ) {
+      console.warn(
+        'Signal rejected: invalid volume.'
+      );
+
+      return;
+    }
+
+    let stopLoss =
+      signal.stopLoss ??
+      signal.sl ??
+      undefined;
+
+    let takeProfit =
+      signal.takeProfit ??
+      signal.tp ??
+      undefined;
+
+    if (
+      stopLoss !== undefined
+    ) {
+      stopLoss =
+        Number(stopLoss);
+    }
+
+    if (
+      takeProfit !== undefined
+    ) {
+      takeProfit =
+        Number(takeProfit);
+    }
+
+    // --------------------------------------------------------
+    // Always log signals.
+    // --------------------------------------------------------
+
+    console.log(
+      `SIGNAL ${action} | ${CONFIG.symbol} | volume=${volume} | SL=${stopLoss ?? 'none'} | TP=${takeProfit ?? 'none'} | live=${CONFIG.liveTrading}`
+    );
+
+    // --------------------------------------------------------
+    // SAFETY SWITCH
+    // --------------------------------------------------------
+
+    if (!CONFIG.liveTrading) {
+      console.log(
+        `LIVE_TRADING=false -> signal recorded, order NOT sent.`
+      );
+
+      return {
+        blocked: true,
+        reason: 'LIVE_TRADING=false',
+        action,
+        volume
+      };
+    }
+
+    // --------------------------------------------------------
+    // EXECUTION
+    // --------------------------------------------------------
+
+    try {
+      let result;
+
+      if (action === 'BUY') {
+        result =
+          await this.broker.buy(
+            volume,
+            stopLoss,
+            takeProfit,
+            signal.comment ||
+              'Gold-Hunter-7Pro'
+          );
+      } else {
+        result =
+          await this.broker.sell(
+            volume,
+            stopLoss,
+            takeProfit,
+            signal.comment ||
+              'Gold-Hunter-7Pro'
+          );
+      }
+
+      this.tradeCount++;
+      this.lastTradeTime =
+        Date.now();
+
+      console.log(
+        `ORDER RESULT ${action}:`,
+        result
+      );
+
+      return result;
+
+    } catch (error) {
+      console.error(
+        `ORDER ERROR ${action}:`,
+        error?.message || error
+      );
+
+      return null;
+    }
+  }
+
+  // ==========================================================
+  // STATUS
+  // ==========================================================
+
+  status() {
+    return {
+      running: this.running,
+      tickCount: this.tickCount,
+      signalCount: this.signalCount,
+      tradeCount: this.tradeCount,
+      lastProcessedTime:
+        this.lastProcessedTime,
+      lastSignalTime:
+        this.lastSignalTime,
+      lastTradeTime:
+        this.lastTradeTime,
+      liveTrading:
+        CONFIG.liveTrading
+    };
+  }
+  }
