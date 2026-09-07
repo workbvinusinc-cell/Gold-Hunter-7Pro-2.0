@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: xauusd-hft-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: METAAPI_TOKEN
+        sync: false
+      - key: METAAPI_ACCOUNT_ID
+        sync: false
+      - key: METAAPI_REGION
+        value: london
+      - key: EXNESS_SYMBOL
+        value: XAUUSDm
+      - key: LIVE_TRADING
+        value: "false"
+      - key: FRONTEND_ORIGIN
+        sync: false

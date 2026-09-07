@@ -1,0 +1,11 @@
+services:
+  xauusd-hft:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install --omit=dev && node backend/server.js"
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./:/app
