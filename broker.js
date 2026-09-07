@@ -1,4 +1,4 @@
-import MetaApi from 'metaapi.cloud-sdk';
+import MetaApi from 'metaapi.cloud-sdk/esm-node';
 import { CONFIG } from './config.js';
 import { Metrics } from './metrics.js';
 
