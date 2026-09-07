@@ -8,11 +8,9 @@ export class ExecutionEngine {
     this.broker = broker;
 
     this.running = false;
+    this.initializing = false;
+    this.initialized = false;
     this.processingTick = false;
-
-    // ========================================================
-    // V3 COMPONENTS
-    // ========================================================
 
     this.candleEngine =
       new CandleEngine();
@@ -22,10 +20,6 @@ export class ExecutionEngine {
 
     this.risk =
       new RiskEngine(CONFIG);
-
-    // ========================================================
-    // TIMING
-    // ========================================================
 
     this.lastProcessedTime = 0;
     this.lastSignalTime = 0;
@@ -37,16 +31,8 @@ export class ExecutionEngine {
     this.minAccountCheckInterval = 1000;
     this.minPositionsCheckInterval = 1000;
 
-    // ========================================================
-    // CACHE
-    // ========================================================
-
     this.accountCache = null;
     this.positionsCache = [];
-
-    // ========================================================
-    // STATISTICS
-    // ========================================================
 
     this.tickCount = 0;
     this.signalCount = 0;
@@ -59,17 +45,7 @@ export class ExecutionEngine {
     this.lastSignal = null;
     this.lastRejection = null;
 
-    this.lastLogTime = 0;
-
-    // ========================================================
-    // DUPLICATE SIGNAL PROTECTION
-    // ========================================================
-
     this.lastSignalId = null;
-
-    // ========================================================
-    // WARM-UP
-    // ========================================================
 
     this.warmupLogged = false;
   }
@@ -78,12 +54,12 @@ export class ExecutionEngine {
   // START
   // ==========================================================
 
-  start() {
-    if (this.running) {
+  async start() {
+    if (this.running || this.initializing) {
       return;
     }
 
-    this.running = true;
+    this.initializing = true;
 
     console.log(
       '=========================================='
@@ -126,12 +102,138 @@ export class ExecutionEngine {
     );
 
     console.log(
-      '=========================================='
+      'Historical candle initialization starting...'
     );
 
+    try {
+      await this.loadHistoricalCandles();
+
+      this.initialized = true;
+      this.running = true;
+
+      console.log(
+        'Historical candle initialization complete.'
+      );
+
+      console.log(
+        'Execution engine started.'
+      );
+
+      console.log(
+        '=========================================='
+      );
+
+    } catch (error) {
+      console.error(
+        'Historical initialization error:',
+        error?.message || error
+      );
+
+      // Safe fallback: start the engine and allow
+      // CandleEngine to warm up from live ticks.
+      this.initialized = true;
+      this.running = true;
+
+      console.warn(
+        'Falling back to live-tick candle warm-up.'
+      );
+
+    } finally {
+      this.initializing = false;
+    }
+  }
+
+  // ==========================================================
+  // HISTORICAL CANDLE INITIALIZATION
+  // ==========================================================
+
+  async loadHistoricalCandles() {
+    const timeframes = [
+      {
+        name: 'M1',
+        api: '1m',
+        seconds: 60,
+        minimum: 30,
+        count: 80
+      },
+      {
+        name: 'M5',
+        api: '5m',
+        seconds: 300,
+        minimum: 55,
+        count: 80
+      },
+      {
+        name: 'M15',
+        api: '15m',
+        seconds: 900,
+        minimum: 55,
+        count: 80
+      }
+    ];
+
+    let successful = 0;
+
+    for (const tf of timeframes) {
+      try {
+        console.log(
+          `Loading ${tf.name} historical candles...`
+        );
+
+        const candles =
+          await this.broker.historicalCandles(
+            tf.api,
+            tf.count
+          );
+
+        if (
+          Array.isArray(candles) &&
+          candles.length >= tf.minimum
+        ) {
+          this.candleEngine.seed(
+            tf.seconds,
+            candles
+          );
+
+          successful++;
+
+          console.log(
+            `✓ ${tf.name} seeded | ${candles.length} candles`
+          );
+        } else {
+          console.warn(
+            `⚠ ${tf.name} insufficient historical data | received=${candles?.length || 0} required=${tf.minimum}`
+          );
+        }
+
+      } catch (error) {
+        console.warn(
+          `⚠ ${tf.name} historical loading failed:`,
+          error?.message || error
+        );
+      }
+    }
+
     console.log(
-      'Execution engine started.'
+      `Historical initialization summary: ${successful}/3 timeframes seeded.`
     );
+
+    const state =
+      this.candleEngine.status();
+
+    console.log(
+      `Candle state | M1=${state.m1} | M5=${state.m5} | M15=${state.m15}`
+    );
+
+    if (successful === 0) {
+      console.warn(
+        'No historical candles were loaded.'
+      );
+
+      console.warn(
+        'The engine will use live tick candle construction.'
+      );
+    }
   }
 
   // ==========================================================
@@ -155,6 +257,10 @@ export class ExecutionEngine {
       return;
     }
 
+    if (!this.initialized) {
+      return;
+    }
+
     if (!price) {
       return;
     }
@@ -165,10 +271,6 @@ export class ExecutionEngine {
     ) {
       return;
     }
-
-    // --------------------------------------------------------
-    // Prevent overlapping tick processing.
-    // --------------------------------------------------------
 
     if (this.processingTick) {
       return;
@@ -182,10 +284,6 @@ export class ExecutionEngine {
       const now = Date.now();
 
       this.lastProcessedTime = now;
-
-      // ======================================================
-      // PRICE VALIDATION
-      // ======================================================
 
       const bid = Number(price.bid);
       const ask = Number(price.ask);
@@ -205,17 +303,17 @@ export class ExecutionEngine {
           ? Number(price.mid)
           : (bid + ask) / 2;
 
-      const spread = ask - bid;
+      const spread =
+        ask - bid;
 
       const timeMs =
         Number(price.timeMs) || now;
 
-      // ======================================================
-      // STALE TICK PROTECTION
-      // ======================================================
-
       const tickAge =
-        Math.max(0, now - timeMs);
+        Math.max(
+          0,
+          now - timeMs
+        );
 
       if (
         tickAge >
@@ -223,10 +321,6 @@ export class ExecutionEngine {
       ) {
         return;
       }
-
-      // ======================================================
-      // SPREAD PROTECTION
-      // ======================================================
 
       if (
         Number.isFinite(CONFIG.maxSpread) &&
@@ -245,7 +339,7 @@ export class ExecutionEngine {
       };
 
       // ======================================================
-      // BUILD 1M / 5M / 15M CANDLES
+      // LIVE CANDLE UPDATES
       // ======================================================
 
       this.candleEngine.updateTick(
@@ -253,10 +347,12 @@ export class ExecutionEngine {
       );
 
       // ======================================================
-      // WARM-UP
+      // WARM-UP CHECK
       // ======================================================
 
-      if (!this.candleEngine.ready()) {
+      if (
+        !this.candleEngine.ready()
+      ) {
         if (!this.warmupLogged) {
           const state =
             this.candleEngine.status();
@@ -339,7 +435,8 @@ export class ExecutionEngine {
 
       if (!riskCheck.ok) {
         this.lastRejection = {
-          reason: riskCheck.reason,
+          reason:
+            riskCheck.reason,
           time: now
         };
 
@@ -347,7 +444,7 @@ export class ExecutionEngine {
       }
 
       // ======================================================
-      // GENERATE V3 SIGNAL
+      // SIGNAL
       // ======================================================
 
       const signal =
@@ -366,13 +463,10 @@ export class ExecutionEngine {
       this.lastSignalTime = now;
       this.lastSignal = signal;
 
-      // ======================================================
-      // SIGNAL VALIDATION
-      // ======================================================
-
       if (
         signal.id &&
-        signal.id === this.lastSignalId
+        signal.id ===
+          this.lastSignalId
       ) {
         return;
       }
@@ -402,13 +496,12 @@ export class ExecutionEngine {
         return;
       }
 
-      // ======================================================
-      // SIGNAL EXPIRY
-      // ======================================================
-
       if (
         signal.expiresAt &&
-        now > Number(signal.expiresAt)
+        now >
+          Number(
+            signal.expiresAt
+          )
       ) {
         this.reject(
           'signal expired'
@@ -416,10 +509,6 @@ export class ExecutionEngine {
 
         return;
       }
-
-      // ======================================================
-      // STRATEGY RISK VALIDATION
-      // ======================================================
 
       const signalRisk =
         this.risk.validateSignal(
@@ -436,12 +525,9 @@ export class ExecutionEngine {
         return;
       }
 
-      // ======================================================
-      // COOLDOWN
-      // ======================================================
-
       if (
-        now - this.lastTradeTime <
+        now -
+          this.lastTradeTime <
         CONFIG.cooldownMs
       ) {
         return;
@@ -467,7 +553,8 @@ export class ExecutionEngine {
         return;
       }
 
-      signal.volume = volume;
+      signal.volume =
+        volume;
 
       // ======================================================
       // EXECUTE
@@ -509,16 +596,13 @@ export class ExecutionEngine {
       const m15 =
         this.candleEngine.get(900);
 
-      const signal =
-        this.strategy.evaluate({
-          m15,
-          m5,
-          m1,
-          tick: price,
-          spread: price.spread
-        });
-
-      return signal;
+      return this.strategy.evaluate({
+        m15,
+        m5,
+        m1,
+        tick: price,
+        spread: price.spread
+      });
 
     } catch (error) {
       console.error(
@@ -538,19 +622,32 @@ export class ExecutionEngine {
     equity,
     slDist
   ) {
-    /*
-     * XAUUSD contract-size fallback.
-     *
-     * Standard XAUUSD CFD contract size is commonly 100
-     * ounces per lot, but broker specification remains the
-     * authoritative source.
-     */
+    const brokerSpec =
+      this.broker.spec || {};
 
     const spec = {
-      contractSize: 100,
-      minVolume: 0.01,
-      maxVolume: 200,
-      volumeStep: 0.01
+      contractSize:
+        Number(
+          brokerSpec.contractSize
+        ) || 100,
+
+      minVolume:
+        Number(
+          brokerSpec.minVolume ??
+          brokerSpec.volumeMin
+        ) || 0.01,
+
+      maxVolume:
+        Number(
+          brokerSpec.maxVolume ??
+          brokerSpec.volumeMax
+        ) || 200,
+
+      volumeStep:
+        Number(
+          brokerSpec.volumeStep ??
+          brokerSpec.volumeMinStep
+        ) || 0.01
     };
 
     return this.risk.sizeLots(
@@ -613,10 +710,6 @@ export class ExecutionEngine {
       return null;
     }
 
-    // ======================================================
-    // FINAL PRICE PROTECTION
-    // ======================================================
-
     const bid =
       Number(price.bid);
 
@@ -650,10 +743,6 @@ export class ExecutionEngine {
       return null;
     }
 
-    // ======================================================
-    // FINAL SIGNAL AGE CHECK
-    // ======================================================
-
     if (
       signal.createdAt &&
       Date.now() -
@@ -666,10 +755,6 @@ export class ExecutionEngine {
 
       return null;
     }
-
-    // ======================================================
-    // LOG
-    // ======================================================
 
     console.log(
       '=========================================='
@@ -724,14 +809,17 @@ export class ExecutionEngine {
     );
 
     if (
-      Array.isArray(signal.reasons)
+      Array.isArray(
+        signal.reasons
+      )
     ) {
       console.log(
         'Reasons:'
       );
 
       for (
-        const reason of signal.reasons
+        const reason of
+          signal.reasons
       ) {
         console.log(
           `  ✓ ${reason}`
@@ -746,10 +834,6 @@ export class ExecutionEngine {
     console.log(
       '=========================================='
     );
-
-    // ======================================================
-    // SAFETY SWITCH
-    // ======================================================
 
     if (!CONFIG.liveTrading) {
       console.log(
@@ -769,10 +853,6 @@ export class ExecutionEngine {
         signal
       };
     }
-
-    // ======================================================
-    // LIVE EXECUTION
-    // ======================================================
 
     try {
       let result;
@@ -905,7 +985,7 @@ export class ExecutionEngine {
   }
 
   // ==========================================================
-  // REJECTION LOG
+  // REJECTION
   // ==========================================================
 
   reject(reason) {
@@ -928,6 +1008,12 @@ export class ExecutionEngine {
     return {
       running:
         this.running,
+
+      initializing:
+        this.initializing,
+
+      initialized:
+        this.initialized,
 
       strategy:
         'Gold Hunter HFT V3',
@@ -978,4 +1064,4 @@ export class ExecutionEngine {
         this.risk.status()
     };
   }
-  }
+    }
