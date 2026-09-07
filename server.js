@@ -1,57 +1,256 @@
+import 'dotenv/config';
 import express from 'express';
-import http from 'http';
-import { WebSocketServer } from 'ws';
+
 import { CONFIG, assertConfig } from './config.js';
 import { ExnessBroker } from './broker.js';
 import { ExecutionEngine } from './execution-engine.js';
 
-const app=express();
-const server=http.createServer(app);
-const wss=new WebSocketServer({server,path:'/ws'});
+const app = express();
+
 app.use(express.json());
 
-function originAllowed(origin){
-  if(CONFIG.frontendOrigin==='*') return true;
-  return !origin || origin===CONFIG.frontendOrigin;
-}
+const broker = new ExnessBroker();
 
-app.use((req,res,next)=>{
-  const origin=req.headers.origin;
-  if(originAllowed(origin)){
-    res.setHeader('Access-Control-Allow-Origin',origin||CONFIG.frontendOrigin);
-    res.setHeader('Vary','Origin');
-    res.setHeader('Access-Control-Allow-Headers','Content-Type');
-  }
-  if(req.method==='OPTIONS') return res.sendStatus(204);
-  next();
+let executionEngine = null;
+let started = false;
+let startError = null;
+
+// ============================================================
+// BASIC ROUTES
+// ============================================================
+
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Gold-Hunter-7Pro-2.0',
+    status: started ? 'online' : 'starting',
+    brokerConnected: broker.ready,
+    symbol: CONFIG.symbol,
+    liveTrading: CONFIG.liveTrading,
+    timestamp: new Date().toISOString()
+  });
 });
 
-app.get('/',(req,res)=>res.json({service:'xauusd-hft-backend',ok:true,ts:Date.now()}));
-app.get('/health',(req,res)=>res.status(200).json({ok:true,service:'xauusd-hft',ts:Date.now(),liveTrading:CONFIG.liveTrading}));
-
-let broker,engine;
-async function boot(){
-  assertConfig();
-  broker=new ExnessBroker();
-  engine=new ExecutionEngine(broker);
-  wss.on('connection',(ws,req)=>{
-    const origin=req.headers.origin;
-    if(!originAllowed(origin)){ws.close(1008,'Origin not allowed');return;}
-    engine.addClient(ws);
-    ws.on('message',raw=>{
-      try{
-        const msg=JSON.parse(raw.toString());
-        if(msg.type==='control') engine.control(msg);
-        else if(msg.type==='heartbeat') ws.send(JSON.stringify({type:'heartbeat',ts:Date.now()}));
-      }catch{}
-    });
+app.get('/health', async (req, res) => {
+  res.json({
+    ok: started && broker.ready,
+    status: started ? 'online' : 'starting',
+    brokerConnected: broker.ready,
+    symbol: CONFIG.symbol,
+    liveTrading: CONFIG.liveTrading,
+    timestamp: new Date().toISOString()
   });
-  const state=await broker.connect();
-  console.log('MetaApi/Exness connected:',state.connectedToBroker,'spec:',state.specification?.symbol);
-  console.log('LIVE_TRADING:',CONFIG.liveTrading);
+});
+
+app.get('/status', async (req, res) => {
+  let account = null;
+  let positions = [];
+
+  try {
+    if (broker.ready) {
+      account = await broker.accountInfo();
+      positions = await broker.positions();
+    }
+  } catch (error) {
+    console.error(
+      'Status query error:',
+      error?.message || error
+    );
+  }
+
+  res.json({
+    bot: 'Gold-Hunter-7Pro-2.0',
+    started,
+    brokerConnected: broker.ready,
+    symbol: CONFIG.symbol,
+    liveTrading: CONFIG.liveTrading,
+    account,
+    positions,
+    lastPrice: broker.lastPrice,
+    error: startError,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ============================================================
+// START BOT
+// ============================================================
+
+async function startBot() {
+  if (started) {
+    return;
+  }
+
+  try {
+    assertConfig();
+
+    console.log('==========================================');
+    console.log(' GOLD-HUNTER-7PRO-2.0');
+    console.log('==========================================');
+
+    console.log(
+      `Symbol: ${CONFIG.symbol}`
+    );
+
+    console.log(
+      `MetaApi region: ${CONFIG.region}`
+    );
+
+    console.log(
+      `LIVE_TRADING: ${CONFIG.liveTrading}`
+    );
+
+    // --------------------------------------------------------
+    // CONNECT BROKER
+    // --------------------------------------------------------
+
+    await broker.connect();
+
+    console.log(
+      `Broker ready: ${broker.ready}`
+    );
+
+    if (!broker.ready) {
+      throw new Error(
+        'Broker connection did not become ready'
+      );
+    }
+
+    // --------------------------------------------------------
+    // START EXECUTION ENGINE
+    // --------------------------------------------------------
+
+    executionEngine =
+      new ExecutionEngine(broker);
+
+    executionEngine.start();
+
+    // --------------------------------------------------------
+    // RECEIVE MARKET TICKS
+    // --------------------------------------------------------
+
+    broker.onTick(async price => {
+      try {
+        if (!executionEngine) {
+          return;
+        }
+
+        await executionEngine.onTick(price);
+      } catch (error) {
+        console.error(
+          'Execution engine tick error:',
+          error?.message || error
+        );
+      }
+    });
+
+    started = true;
+
+    console.log('==========================================');
+    console.log(' BOT ONLINE');
+    console.log('==========================================');
+
+    console.log(
+      `Broker connected: ${broker.ready}`
+    );
+
+    console.log(
+      `Market data: ${CONFIG.symbol}`
+    );
+
+    console.log(
+      `Live trading: ${CONFIG.liveTrading}`
+    );
+
+    console.log('==========================================');
+  } catch (error) {
+    startError =
+      error?.message || String(error);
+
+    console.error(
+      'BOT START ERROR:',
+      startError
+    );
+
+    started = false;
+  }
 }
 
-server.listen(CONFIG.port,CONFIG.host,()=>console.log(`HFT server listening on ${CONFIG.host}:${CONFIG.port}`));
-boot().catch(err=>{console.error('BOOT FAILED:',err);process.exitCode=1;});
-process.on('SIGINT',async()=>{await engine?.shutdown();process.exit(0);});
-process.on('SIGTERM',async()=>{await engine?.shutdown();process.exit(0);});
+// ============================================================
+// HTTP SERVER
+// ============================================================
+
+const port = Number(
+  process.env.PORT || CONFIG.port || 10000
+);
+
+const host =
+  process.env.HOST ||
+  CONFIG.host ||
+  '0.0.0.0';
+
+app.listen(port, host, () => {
+  console.log(
+    `HFT server listening on ${host}:${port}`
+  );
+
+  startBot();
+});
+
+// ============================================================
+// GRACEFUL SHUTDOWN
+// ============================================================
+
+async function shutdown(signal) {
+  console.log(
+    `Received ${signal}. Shutting down...`
+  );
+
+  try {
+    if (executionEngine) {
+      executionEngine.stop();
+    }
+
+    await broker.shutdown();
+  } catch (error) {
+    console.error(
+      'Shutdown error:',
+      error?.message || error
+    );
+  }
+
+  process.exit(0);
+}
+
+process.on(
+  'SIGINT',
+  () => shutdown('SIGINT')
+);
+
+process.on(
+  'SIGTERM',
+  () => shutdown('SIGTERM')
+);
+
+// ============================================================
+// UNHANDLED ERRORS
+// ============================================================
+
+process.on(
+  'unhandledRejection',
+  error => {
+    console.error(
+      'Unhandled promise rejection:',
+      error?.message || error
+    );
+  }
+);
+
+process.on(
+  'uncaughtException',
+  error => {
+    console.error(
+      'Uncaught exception:',
+      error?.message || error
+    );
+  }
+);
