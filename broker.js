@@ -7,17 +7,29 @@ export class ExnessBroker {
     this.api = null;
     this.account = null;
     this.connection = null;
+
     this.symbol = CONFIG.symbol;
     this.spec = null;
+
     this.metrics = new Metrics();
     this.listeners = new Set();
+
     this.ready = false;
     this.lastPrice = null;
+
+    this.lastTickLog = 0;
   }
+
+  // ---------------------------------------------------------
+  // TICK LISTENERS
+  // ---------------------------------------------------------
 
   onTick(fn) {
     this.listeners.add(fn);
-    return () => this.listeners.delete(fn);
+
+    return () => {
+      this.listeners.delete(fn);
+    };
   }
 
   emitTick(price) {
@@ -25,33 +37,83 @@ export class ExnessBroker {
       try {
         fn(price);
       } catch (e) {
-        console.error('tick handler error:', e);
+        console.error('Tick handler error:', e);
       }
     }
   }
 
+  // ---------------------------------------------------------
+  // CONNECT TO METAAPI / EXNESS
+  // ---------------------------------------------------------
+
   async connect() {
+    if (!CONFIG.metaApiToken) {
+      throw new Error('METAAPI_TOKEN is missing');
+    }
+
+    if (!CONFIG.accountId) {
+      throw new Error('METAAPI_ACCOUNT_ID is missing');
+    }
+
+    // Keep reference to the actual ExnessBroker instance.
+    // MetaApi listener callbacks have their own "this".
+    const broker = this;
+
+    console.log('Connecting to MetaApi...');
+    console.log(`MetaApi region: ${CONFIG.region}`);
+    console.log(`Trading symbol: ${CONFIG.symbol}`);
+
     this.api = new MetaApi(CONFIG.metaApiToken, {
       region: CONFIG.region
     });
+
+    // -------------------------------------------------------
+    // GET ACCOUNT
+    // -------------------------------------------------------
 
     this.account =
       await this.api.metatraderAccountApi.getAccount(
         CONFIG.accountId
       );
 
-    console.log(
-      `MetaApi account region: ${this.account.region}`
-    );
-
+    console.log(`MetaApi account region: ${this.account.region}`);
     console.log(
       `MetaApi account connection status: ${this.account.connectionStatus}`
     );
 
+    // -------------------------------------------------------
+    // DEPLOY ACCOUNT IF REQUIRED
+    // -------------------------------------------------------
+
+    if (
+      this.account.state !== 'DEPLOYED' &&
+      this.account.state !== 'DEPLOYING'
+    ) {
+      console.log('MetaApi account is not deployed. Deploying...');
+
+      await this.account.deploy();
+
+      console.log('MetaApi account deployment requested.');
+    }
+
+    // -------------------------------------------------------
+    // STREAMING CONNECTION
+    // -------------------------------------------------------
+
     this.connection =
       this.account.getStreamingConnection();
 
+    console.log('Connecting MetaApi websocket client...');
+
+    // -------------------------------------------------------
+    // SYNCHRONIZATION LISTENER
+    // -------------------------------------------------------
+
     this.connection.addSynchronizationListener({
+
+      // -----------------------------------------------
+      // CONNECTION
+      // -----------------------------------------------
 
       async onConnected(instanceIndex, replicas) {
         console.log(
@@ -64,13 +126,13 @@ export class ExnessBroker {
           `MetaApi terminal disconnected: ${instanceIndex}`
         );
 
-        this.ready = false;
+        broker.ready = false;
       },
 
       async onHealthStatus(instanceIndex, status) {
         console.log(
-          `MetaApi health status: ${instanceIndex}`,
-          status
+          `MetaApi health status ${instanceIndex}:`,
+          status || {}
         );
       },
 
@@ -79,15 +141,18 @@ export class ExnessBroker {
         connected
       ) {
         console.log(
-          `Broker connection: ${instanceIndex} -> ${connected}`
+          `Broker connection ${instanceIndex} -> ${connected}`
         );
       },
 
+      // -----------------------------------------------
+      // SYNCHRONIZATION
+      // -----------------------------------------------
+
       async onSynchronizationStarted(
         instanceIndex,
+        specifications,
         specificationsHash,
-        positionsHash,
-        ordersHash,
         synchronizationId
       ) {
         console.log(
@@ -99,80 +164,91 @@ export class ExnessBroker {
         instanceIndex,
         accountInformation
       ) {
-        // Account state is maintained by MetaApi terminalState.
+        // Account information is handled on demand.
       },
 
       async onPositionsReplaced(
         instanceIndex,
         positions
-      ) {},
-
-      async onPositionsSynchronized(
-        instanceIndex,
-        synchronizationId
-      ) {},
-
-      async onPositionsUpdated(
-        instanceIndex,
-        positions,
-        removedPositionIds
-      ) {},
+      ) {
+        // No action required.
+      },
 
       async onPositionUpdated(
         instanceIndex,
         position
-      ) {},
+      ) {
+        // No action required.
+      },
 
       async onPositionRemoved(
         instanceIndex,
         positionId
-      ) {},
+      ) {
+        // No action required.
+      },
 
-      async onPendingOrdersReplaced(
+      async onOrdersReplaced(
         instanceIndex,
         orders
-      ) {},
+      ) {
+        // No action required.
+      },
 
-      async onPendingOrdersUpdated(
-        instanceIndex,
-        orders,
-        completedOrderIds
-      ) {},
-
-      async onPendingOrderUpdated(
+      async onOrderUpdated(
         instanceIndex,
         order
-      ) {},
+      ) {
+        // No action required.
+      },
 
-      async onPendingOrderCompleted(
+      async onOrderCompleted(
         instanceIndex,
         orderId
-      ) {},
+      ) {
+        console.log(
+          `Order completed: ${orderId}`
+        );
+      },
 
-      async onPendingOrdersSynchronized(
+      async onOrderRemoved(
         instanceIndex,
-        synchronizationId
-      ) {},
+        orderId
+      ) {
+        // No action required.
+      },
 
-      async onHistoryOrderAdded(
+      async onHistoryOrdersAdded(
         instanceIndex,
-        historyOrder
-      ) {},
+        historyOrders
+      ) {
+        // No action required.
+      },
 
-      async onHistoryOrdersSynchronized(
+      async onHistoryOrdersRemoved(
         instanceIndex,
-        synchronizationId
-      ) {},
+        historyOrders
+      ) {
+        // No action required.
+      },
 
-      async onDealAdded(
+      async onHistoryDealsAdded(
         instanceIndex,
-        deal
-      ) {},
+        deals
+      ) {
+        // No action required.
+      },
 
-      async onDealsSynchronized(
+      async onHistoryDealsRemoved(
         instanceIndex,
-        synchronizationId
-      ) {},
+        deals
+      ) {
+        // No action required.
+      },
+
+      // -----------------------------------------------
+      // SYMBOL SPECIFICATION
+      // -----------------------------------------------
 
       async onSymbolSpecificationUpdated(
         instanceIndex,
@@ -180,12 +256,12 @@ export class ExnessBroker {
       ) {
         if (
           specification &&
-          specification.symbol === this.symbol
+          specification.symbol === broker.symbol
         ) {
-          this.spec = specification;
+          broker.spec = specification;
 
           console.log(
-            `Symbol specification received: ${this.symbol}`
+            `Symbol specification received: ${broker.symbol}`
           );
         }
       },
@@ -193,33 +269,48 @@ export class ExnessBroker {
       async onSymbolSpecificationRemoved(
         instanceIndex,
         symbol
-      ) {},
-
-      async onSymbolSpecificationsUpdated(
-        instanceIndex,
-        specifications,
-        removedSymbols
       ) {
-        if (!Array.isArray(specifications)) return;
+        if (symbol === broker.symbol) {
+          broker.spec = null;
 
-        const match = specifications.find(
-          s => s?.symbol === this.symbol
-        );
-
-        if (match) {
-          this.spec = match;
-
-          console.log(
-            `Symbol specification received: ${this.symbol}`
+          console.warn(
+            `Symbol specification removed: ${symbol}`
           );
         }
       },
+
+      async onSymbolSpecificationsUpdated(
+        instanceIndex,
+        specifications
+      ) {
+        if (!Array.isArray(specifications)) {
+          return;
+        }
+
+        const found = specifications.find(
+          specification =>
+            specification &&
+            specification.symbol === broker.symbol
+        );
+
+        if (found) {
+          broker.spec = found;
+
+          console.log(
+            `Symbol specification received: ${broker.symbol}`
+          );
+        }
+      },
+
+      // -----------------------------------------------
+      // PRICE STREAM
+      // -----------------------------------------------
 
       async onSymbolPriceUpdated(
         instanceIndex,
         price
       ) {
-        await this.processPrice(price);
+        await broker.processPrice(price);
       },
 
       async onSymbolPricesUpdated(
@@ -231,12 +322,18 @@ export class ExnessBroker {
         marginLevel,
         accountCurrencyExchangeRate
       ) {
-        if (!Array.isArray(prices)) return;
+        if (!Array.isArray(prices)) {
+          return;
+        }
 
         for (const price of prices) {
-          await this.processPrice(price);
+          await broker.processPrice(price);
         }
       },
+
+      // -----------------------------------------------
+      // MARKET DATA
+      // -----------------------------------------------
 
       async onCandlesUpdated(
         instanceIndex,
@@ -246,7 +343,9 @@ export class ExnessBroker {
         freeMargin,
         marginLevel,
         accountCurrencyExchangeRate
-      ) {},
+      ) {
+        // Candle engine can request candles directly.
+      },
 
       async onTicksUpdated(
         instanceIndex,
@@ -256,7 +355,9 @@ export class ExnessBroker {
         freeMargin,
         marginLevel,
         accountCurrencyExchangeRate
-      ) {},
+      ) {
+        // Price events are handled above.
+      },
 
       async onBooksUpdated(
         instanceIndex,
@@ -266,14 +367,46 @@ export class ExnessBroker {
         freeMargin,
         marginLevel,
         accountCurrencyExchangeRate
-      ) {},
+      ) {
+        // Order book data is optional.
+      },
 
-      async onSubscriptionDowngraded(
+      // -----------------------------------------------
+      // DEALS
+      // -----------------------------------------------
+
+      async onDealAdded(
         instanceIndex,
-        symbol,
-        updates,
-        unsubscriptions
-      ) {},
+        deal
+      ) {
+        if (deal) {
+          console.log(
+            `Deal added: ${deal.id || 'unknown'}`
+          );
+        }
+      },
+
+      async onDealRemoved(
+        instanceIndex,
+        deal
+      ) {
+        // No action required.
+      },
+
+      // -----------------------------------------------
+      // SYMBOL PRICES RESET
+      // -----------------------------------------------
+
+      async onSymbolPricesReset(
+        instanceIndex,
+        symbols
+      ) {
+        // No action required.
+      },
+
+      // -----------------------------------------------
+      // STREAMING STATUS
+      // -----------------------------------------------
 
       async onStreamClosed(
         instanceIndex
@@ -281,22 +414,30 @@ export class ExnessBroker {
         console.warn(
           `MetaApi stream closed: ${instanceIndex}`
         );
-      },
 
-      async onUnsubscribeRegion(
-        region
-      ) {
-        console.warn(
-          `MetaApi region unsubscribed: ${region}`
-        );
+        broker.ready = false;
       }
     });
 
+    // -------------------------------------------------------
+    // CONNECT
+    // -------------------------------------------------------
+
     await this.connection.connect();
+
+    console.log('MetaApi websocket connected.');
+
+    // -------------------------------------------------------
+    // WAIT FOR TERMINAL SYNCHRONIZATION
+    // -------------------------------------------------------
 
     await this.connection.waitSynchronized();
 
-    console.log('MetaApi synchronization complete');
+    console.log('MetaApi synchronization complete.');
+
+    // -------------------------------------------------------
+    // SUBSCRIBE TO XAUUSDm
+    // -------------------------------------------------------
 
     await this.connection.subscribeToMarketData(
       this.symbol
@@ -306,36 +447,55 @@ export class ExnessBroker {
       `Subscribed to market data: ${this.symbol}`
     );
 
-    this.spec =
-      this.connection.terminalState.specification(
-        this.symbol
-      );
+    // -------------------------------------------------------
+    // LOAD SYMBOL SPECIFICATION
+    // -------------------------------------------------------
 
-    if (!this.spec) {
+    try {
+      this.spec =
+        await this.connection.getSymbolSpecification(
+          this.symbol
+        );
+
+      if (this.spec) {
+        console.log(
+          `Symbol specification loaded: ${this.symbol}`
+        );
+      }
+    } catch (error) {
       console.warn(
-        `WARNING: No symbol specification found for ${this.symbol}`
-      );
-    } else {
-      console.log(
-        `Symbol specification loaded: ${this.symbol}`
+        `Could not load symbol specification for ${this.symbol}:`,
+        error.message
       );
     }
 
+    // -------------------------------------------------------
+    // READY
+    // -------------------------------------------------------
+
     this.ready = true;
 
-    return {
-      connected:
-        this.connection.terminalState.connected,
+    console.log(
+      `MetaApi/Exness connected: ${this.ready} spec: ${this.symbol}`
+    );
 
-      connectedToBroker:
-        this.connection.terminalState.connectedToBroker,
+    console.log(
+      `LIVE_TRADING: ${CONFIG.liveTrading}`
+    );
 
-      specification: this.spec
-    };
+    return true;
   }
 
+  // ---------------------------------------------------------
+  // PROCESS PRICE
+  // ---------------------------------------------------------
+
   async processPrice(price) {
-    if (!price || price.symbol !== this.symbol) {
+    if (!price) {
+      return;
+    }
+
+    if (price.symbol !== this.symbol) {
       return;
     }
 
@@ -353,9 +513,16 @@ export class ExnessBroker {
 
     const receivedAt = Date.now();
 
-    const timeMs = price.time
-      ? new Date(price.time).getTime()
-      : receivedAt;
+    let timeMs = receivedAt;
+
+    if (price.time) {
+      const parsedTime =
+        new Date(price.time).getTime();
+
+      if (Number.isFinite(parsedTime)) {
+        timeMs = parsedTime;
+      }
+    }
 
     const p = {
       symbol: price.symbol,
@@ -368,79 +535,223 @@ export class ExnessBroker {
 
     this.lastPrice = p;
 
-    this.metrics.tick();
+    // Update metrics.
+    try {
+      this.metrics.tick();
+    } catch (error) {
+      console.error(
+        'Metrics tick error:',
+        error.message
+      );
+    }
 
+    // Send price to strategy / execution engine.
     this.emitTick(p);
+
+    // -------------------------------------------------------
+    // LOW-FREQUENCY DEBUG LOG
+    // Prevent Render logs from being flooded.
+    // -------------------------------------------------------
+
+    if (
+      receivedAt - this.lastTickLog >= 10000
+    ) {
+      this.lastTickLog = receivedAt;
+
+      console.log(
+        `XAUUSDm price stream OK | Bid: ${bid} | Ask: ${ask} | Spread: ${(ask - bid).toFixed(3)}`
+      );
+    }
   }
 
-  accountInfo() {
-    return (
-      this.connection?.terminalState
-        ?.accountInformation || null
-    );
+  // ---------------------------------------------------------
+  // ACCOUNT INFORMATION
+  // ---------------------------------------------------------
+
+  async accountInfo() {
+    if (!this.connection) {
+      throw new Error(
+        'MetaApi connection is not available'
+      );
+    }
+
+    return await this.connection.getAccountInformation();
   }
 
-  positions() {
-    return (
-      this.connection?.terminalState?.positions || []
-    );
+  // ---------------------------------------------------------
+  // OPEN POSITIONS
+  // ---------------------------------------------------------
+
+  async positions() {
+    if (!this.connection) {
+      throw new Error(
+        'MetaApi connection is not available'
+      );
+    }
+
+    return await this.connection.getPositions();
   }
 
-  async buy(volume, sl, tp, clientId) {
-    return this.connection.createMarketBuyOrder(
+  // ---------------------------------------------------------
+  // BUY
+  // ---------------------------------------------------------
+
+  async buy(
+    volume,
+    stopLoss = undefined,
+    takeProfit = undefined,
+    comment = 'Gold-Hunter-7Pro'
+  ) {
+    if (!this.connection) {
+      throw new Error(
+        'MetaApi connection is not available'
+      );
+    }
+
+    if (!CONFIG.liveTrading) {
+      console.log(
+        `LIVE_TRADING=false -> BUY blocked | ${this.symbol} | volume=${volume}`
+      );
+
+      return {
+        blocked: true,
+        reason: 'LIVE_TRADING=false'
+      };
+    }
+
+    return await this.connection.createMarketBuyOrder(
       this.symbol,
       volume,
-      sl,
-      tp,
+      stopLoss,
+      takeProfit,
       {
-        comment: 'XAU HFT',
-        clientId,
+        comment,
         magic: CONFIG.magic
       }
     );
   }
 
-  async sell(volume, sl, tp, clientId) {
-    return this.connection.createMarketSellOrder(
+  // ---------------------------------------------------------
+  // SELL
+  // ---------------------------------------------------------
+
+  async sell(
+    volume,
+    stopLoss = undefined,
+    takeProfit = undefined,
+    comment = 'Gold-Hunter-7Pro'
+  ) {
+    if (!this.connection) {
+      throw new Error(
+        'MetaApi connection is not available'
+      );
+    }
+
+    if (!CONFIG.liveTrading) {
+      console.log(
+        `LIVE_TRADING=false -> SELL blocked | ${this.symbol} | volume=${volume}`
+      );
+
+      return {
+        blocked: true,
+        reason: 'LIVE_TRADING=false'
+      };
+    }
+
+    return await this.connection.createMarketSellOrder(
       this.symbol,
       volume,
-      sl,
-      tp,
+      stopLoss,
+      takeProfit,
       {
-        comment: 'XAU HFT',
-        clientId,
+        comment,
         magic: CONFIG.magic
       }
     );
   }
 
-  async modify(positionId, sl, tp) {
-    return this.connection.modifyPosition(
+  // ---------------------------------------------------------
+  // MODIFY POSITION
+  // ---------------------------------------------------------
+
+  async modify(
+    positionId,
+    stopLoss = undefined,
+    takeProfit = undefined
+  ) {
+    if (!this.connection) {
+      throw new Error(
+        'MetaApi connection is not available'
+      );
+    }
+
+    if (!CONFIG.liveTrading) {
+      console.log(
+        `LIVE_TRADING=false -> MODIFY blocked | position=${positionId}`
+      );
+
+      return {
+        blocked: true,
+        reason: 'LIVE_TRADING=false'
+      };
+    }
+
+    return await this.connection.modifyPosition(
       positionId,
-      sl,
-      tp
+      stopLoss,
+      takeProfit
     );
   }
+
+  // ---------------------------------------------------------
+  // CLOSE POSITION
+  // ---------------------------------------------------------
 
   async close(positionId) {
-    return this.connection.closePosition(
+    if (!this.connection) {
+      throw new Error(
+        'MetaApi connection is not available'
+      );
+    }
+
+    if (!CONFIG.liveTrading) {
+      console.log(
+        `LIVE_TRADING=false -> CLOSE blocked | position=${positionId}`
+      );
+
+      return {
+        blocked: true,
+        reason: 'LIVE_TRADING=false'
+      };
+    }
+
+    return await this.connection.closePosition(
       positionId
     );
   }
 
+  // ---------------------------------------------------------
+  // SHUTDOWN
+  // ---------------------------------------------------------
+
   async shutdown() {
-    try {
-      await this.connection?.unsubscribeFromMarketData(
-        this.symbol
-      );
-    } catch {}
+    this.ready = false;
 
-    try {
-      await this.connection?.close();
-    } catch {}
+    if (this.connection) {
+      try {
+        await this.connection.close();
+      } catch (error) {
+        console.warn(
+          'MetaApi connection close warning:',
+          error.message
+        );
+      }
+    }
 
-    try {
-      await this.api?.close();
-    } catch {}
+    this.connection = null;
+    this.account = null;
+    this.api = null;
+
+    console.log('MetaApi broker shutdown complete.');
   }
-}
+        }
