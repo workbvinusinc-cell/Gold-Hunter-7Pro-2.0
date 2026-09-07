@@ -44,51 +44,59 @@ export class ExnessBroker {
       this.account.getStreamingConnection();
 
     this.connection.addSynchronizationListener({
-      onSymbolPriceUpdated: async (_instanceIndex, price) => {
-        if (price?.symbol !== this.symbol) {
-          return;
+      onSymbolPricesUpdated: async (_instanceIndex, prices) => {
+        if (!Array.isArray(prices)) {
+          prices = [prices];
         }
 
-        const t0 = Date.now();
+        for (const price of prices) {
+          if (price?.symbol !== this.symbol) {
+            continue;
+          }
 
-        const bid = Number(price.bid);
-        const ask = Number(price.ask);
+          const t0 = Date.now();
 
-        if (
-          !Number.isFinite(bid) ||
-          !Number.isFinite(ask)
-        ) {
-          return;
+          const bid = Number(price.bid);
+          const ask = Number(price.ask);
+
+          if (
+            !Number.isFinite(bid) ||
+            !Number.isFinite(ask)
+          ) {
+            continue;
+          }
+
+          const p = {
+            symbol: this.symbol,
+            bid,
+            ask,
+            mid: (bid + ask) / 2,
+            timeMs: price.time
+              ? new Date(price.time).getTime()
+              : Date.now(),
+            receivedAt: Date.now()
+          };
+
+          this.lastPrice = p;
+
+          this.metrics.tick();
+
+          this.emitTick(p);
+
+          this.metrics.recordLatency(
+            Date.now() - t0
+          );
         }
-
-        const p = {
-          symbol: this.symbol,
-          bid,
-          ask,
-          mid: (bid + ask) / 2,
-          timeMs: price.time
-            ? new Date(price.time).getTime()
-            : Date.now(),
-          receivedAt: Date.now()
-        };
-
-        this.lastPrice = p;
-
-        this.metrics.tick();
-
-        this.emitTick(p);
-
-        this.metrics.recordLatency(
-          Date.now() - t0
-        );
       },
 
-      onDisconnected: async (_i) => {
+      onDisconnected: async (_instanceIndex) => {
         this.ready = false;
+        console.warn('MetaApi disconnected');
       },
 
       onConnected: async () => {
         this.ready = true;
+        console.log('MetaApi connection established');
       }
     });
 
